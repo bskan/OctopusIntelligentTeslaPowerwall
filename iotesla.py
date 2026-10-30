@@ -387,6 +387,83 @@ def loadjsonfiles():
     os.system("python io.py > latest.json")
 
 
+def load_latest_json():
+    try:
+        with open('latest.json') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def get_current_next_run_start():
+    latest = load_latest_json()
+    if latest and 'nextRunStart' in latest:
+        return latest['nextRunStart']
+    return None
+
+
+def run_pipeline(input_startDt=None, input_endDt=None):
+    logger.info("Starting run pipeline")
+
+    current_start = get_current_next_run_start()
+
+    if input_startDt is not None:
+        incoming_start = input_startDt
+    else:
+        try:
+            with open('latest.json') as f:
+                iojson = json.load(f)
+            incoming_start = iojson.get('nextRunStart')
+        except FileNotFoundError:
+            incoming_start = None
+
+    logger.info("Incoming startDt: %s, Current latest.json nextRunStart: %s", incoming_start, current_start)
+
+    if incoming_start == current_start:
+        logger.info("Incoming startDt matches latest.json, skipping Octopus API call")
+        return JSONResponse(content={
+            "status": "skipped",
+            "reason": "no_change",
+            "message": "No changes detected. Latest startDt matches latest.json.",
+            "nextRunStart": current_start
+        })
+
+    logger.info("Calling Octopus API via io.py...")
+    os.system("python io.py > latest.json")
+
+    new_latest = load_latest_json()
+    new_start = new_latest.get('nextRunStart') if new_latest else None
+
+    if new_start == current_start:
+        logger.info("Octopus result unchanged, skipping Tesla API call")
+        return JSONResponse(content={
+            "status": "skipped",
+            "reason": "octopus_unchanged",
+            "message": "Octopus API returned the same data. Tesla API not called.",
+            "nextRunStart": new_start
+        })
+
+    logger.info("Octopus data changed, proceeding to Tesla API...")
+
+    if input_startDt and input_endDt:
+        times_obj = [{"startDt": input_startDt, "endDt": input_endDt}]
+        json_input = json.dumps(times_obj)
+        outputjson = tou_json(json_input)
+    else:
+        timesObj_val = new_latest.get("timesObj")
+        timesObj = json.dumps(timesObj_val, indent=4)
+        outputjson = tou_json(timesObj)
+
+    print(json.dumps(outputjson, indent=4))
+    send_tou_settings(outputjson)
+
+    return JSONResponse(content={
+        "status": "complete",
+        "message": "TOU settings generated and sent to Tesla API.",
+        "nextRunStart": new_start
+    })
+
+
 @asynccontextmanager
 async def lifespan(app):
     logger.info("TeslaPy API server starting up")
@@ -424,7 +501,7 @@ async def get_status():
             "tou_json(input_json) -> dict",
             "send_tou_settings(json_data) -> None",
             "loadjsonfiles() -> None",
-            "run_from_latest_json() -> dict",
+            "run_pipeline(input_startDt, input_endDt) -> JSONResponse",
         ]
     }
 
@@ -444,36 +521,14 @@ async def api_tou_json(input: TimesObjInput):
 
 @app.post("/api/run")
 async def api_run(input: TimesObjInput | None = None):
-    """Full pipeline: reload config, generate TOU settings, and send to Tesla API.
-
-    If *input* is provided it overrides the start/end times that would
-    normally come from latest.json.  Without *input* the file-based path
-    is used (the original behaviour).
+    """Full pipeline: compare to latest.json, call Octopus API if needed,
+    then call Tesla API if data changed.
     """
-    logger.info("Starting run...")
     try:
-        loadjsonfiles()
-        logger.info("Loaded json files")
         if input is not None:
-            # Override times from the API caller
-            times_obj = [{"startDt": input.startDt, "endDt": input.endDt}]
-            json_input = json.dumps(times_obj)
-            outputjson = tou_json(json_input)
+            return run_pipeline(input.startDt, input.endDt)
         else:
-            with open('latest.json') as f:
-                iojson = json.load(f)
-            timesObj_val = iojson["timesObj"]
-            timesObj = json.dumps(timesObj_val, indent=4)
-            input_data = json.loads(timesObj)
-            outputjson = tou_json(timesObj)
-
-        print(json.dumps(outputjson, indent=4))
-        send_tou_settings(outputjson)
-
-        return JSONResponse(content={
-            "status": "complete",
-            "message": "TOU settings generated and sent to Tesla API."
-        })
+            return run_pipeline()
     except Exception as e:
         logger.error("Error in run pipeline: %s", str(e))
         raise HTTPException(status_code=500, detail=str(e))

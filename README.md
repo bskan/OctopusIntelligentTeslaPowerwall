@@ -64,7 +64,7 @@ Endpoints:
 | `GET` | `/health` | Health check |
 | `GET` | `/api/status` | Current configuration status |
 | `POST` | `/api/tou-json` | Generate TOU JSON from startDt/endDt |
-| `POST` | `/api/run` | Full pipeline: fetch slots, generate TOU, send to Tesla |
+| `POST` | `/api/run` | Full pipeline: dedup, fetch slots, generate TOU, send to Tesla |
 | `POST` | `/api/send` | Send an already-formed TOU JSON to Tesla |
 
 Example `POST /api/run` body:
@@ -74,6 +74,24 @@ Example `POST /api/run` body:
     "startDt": "2024-01-15 23:30:00+00:00",
     "endDt": "2024-01-16 05:30:00+00:00"
 }
+```
+
+Deduplication:
+
+- If the incoming `startDt` matches `nextRunStart` in `latest.json`, the Octopus API is not called
+- If the Octopus API returns the same `nextRunStart` as `latest.json`, the Tesla API is not called
+- Skipped responses return `{"status": "skipped", "reason": "no_change"}` or `{"status": "skipped", "reason": "octopus_unchanged"}`
+
+Home Assistant example:
+
+```yaml
+rest:
+  - url: "http://iotesla:8000/api/run"
+    method: POST
+    payload: >
+      {"startDt": "{{ states('sensor.octopus_intelligent_next_offpeak_start') }}", "endDt": "{{ states('sensor.octopus_intelligent_next_offpeak_end') }}"}
+    payload_content_type: json
+    content_type: "application/json"
 ```
 
 ### CLI
